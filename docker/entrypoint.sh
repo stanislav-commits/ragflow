@@ -217,6 +217,17 @@ function ensure_db_init() {
   "$PY" -c "from api.db.db_models import init_database_tables as init_web_db; init_web_db()"
 }
 
+function start_optional_binary() {
+    local binary_path="$1"
+    local binary_name="$2"
+
+    if [[ -x "${binary_path}" ]]; then
+        "${binary_path}" &
+    else
+        echo "Skipping ${binary_name}: ${binary_path} not found"
+    fi
+}
+
 # -----------------------------------------------------------------------------
 # Start components based on flags
 # -----------------------------------------------------------------------------
@@ -230,7 +241,7 @@ if [[ "${ENABLE_WEBSERVER}" -eq 1 ]]; then
     echo "Starting ragflow_server..."
     while true; do
         "$PY" api/ragflow_server.py ${INIT_SUPERUSER_ARGS} &
-        bin/server_main &
+        start_optional_binary "bin/server_main" "Go ragflow server"
         wait;
         sleep 1;
     done &
@@ -249,7 +260,7 @@ if [[ "${ENABLE_ADMIN_SERVER}" -eq 1 ]]; then
     echo "Starting admin_server..."
     while true; do
         "$PY" admin/server/admin_server.py &
-        bin/admin_server &
+        start_optional_binary "bin/admin_server" "Go admin server"
         wait;
         sleep 1;
     done &
