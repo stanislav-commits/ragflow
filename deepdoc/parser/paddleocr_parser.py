@@ -494,9 +494,6 @@ class PaddleOCRParser(RAGFlowPdfParser):
         for ii, (pns, left, right, top, bottom) in enumerate(poss):
             right = left + max_width
 
-            if bottom <= top:
-                bottom = top + 2
-
             for pn in pns[1:]:
                 if 0 <= pn - 1 < page_count:
                     bottom += self.page_images[pn - 1].size[1]
@@ -508,8 +505,19 @@ class PaddleOCRParser(RAGFlowPdfParser):
                 continue
 
             img0 = self.page_images[pns[0]]
-            x0, y0, x1, y1 = int(left), int(top), int(right), int(min(bottom, img0.size[1]))
-            crop0 = img0.crop((x0, y0, x1, y1))
+            crop_box = self._safe_crop_box(
+                img0,
+                left,
+                top,
+                right,
+                min(bottom, img0.size[1]),
+                context=f"paddle chunk page={pns[0]} segment={ii}",
+            )
+            if not crop_box:
+                bottom -= img0.size[1]
+                continue
+            x0, y0, x1, y1 = crop_box
+            crop0 = img0.crop(crop_box)
             imgs.append(crop0)
             if 0 < ii < len(poss) - 1:
                 positions.append((pns[0] + self.page_from, x0, x1, y0, y1))
@@ -520,8 +528,19 @@ class PaddleOCRParser(RAGFlowPdfParser):
                     self.logger.warning(f"[PaddleOCR] Page index {pn} out of range for {page_count} pages during crop; skipping this page.")
                     continue
                 page = self.page_images[pn]
-                x0, y0, x1, y1 = int(left), 0, int(right), int(min(bottom, page.size[1]))
-                cimgp = page.crop((x0, y0, x1, y1))
+                crop_box = self._safe_crop_box(
+                    page,
+                    left,
+                    0,
+                    right,
+                    min(bottom, page.size[1]),
+                    context=f"paddle chunk page={pn} segment={ii}",
+                )
+                if not crop_box:
+                    bottom -= page.size[1]
+                    continue
+                x0, y0, x1, y1 = crop_box
+                cimgp = page.crop(crop_box)
                 imgs.append(cimgp)
                 if 0 < ii < len(poss) - 1:
                     positions.append((pn + self.page_from, x0, x1, y0, y1))

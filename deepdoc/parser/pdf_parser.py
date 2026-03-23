@@ -108,6 +108,73 @@ class RAGFlowPdfParser:
         self.page_from = 0
         self.column_num = 1
 
+    def _safe_crop_box(self, image, left, top, right, bottom, context="crop", min_span=1):
+        if image is None:
+            return None
+
+        width, height = image.size
+        width = max(int(width), 1)
+        height = max(int(height), 1)
+
+        left = float(left)
+        top = float(top)
+        right = float(right)
+        bottom = float(bottom)
+
+        if not all(math.isfinite(value) for value in (left, top, right, bottom)):
+            logging.warning(
+                "Skip invalid %s crop with non-finite coordinates: left=%s top=%s right=%s bottom=%s",
+                context,
+                left,
+                top,
+                right,
+                bottom,
+            )
+            return None
+
+        if right < left:
+            left, right = right, left
+        if bottom < top:
+            top, bottom = bottom, top
+
+        left = max(0.0, min(left, float(width)))
+        right = max(0.0, min(right, float(width)))
+        top = max(0.0, min(top, float(height)))
+        bottom = max(0.0, min(bottom, float(height)))
+
+        if right <= left:
+            if left >= width:
+                left = max(0.0, float(width - min_span))
+                right = float(width)
+            else:
+                right = min(float(width), left + float(min_span))
+
+        if bottom <= top:
+            if top >= height:
+                top = max(0.0, float(height - min_span))
+                bottom = float(height)
+            else:
+                bottom = min(float(height), top + float(min_span))
+
+        if right <= left or bottom <= top:
+            logging.warning(
+                "Skip invalid %s crop after normalization: left=%s top=%s right=%s bottom=%s size=%s",
+                context,
+                left,
+                top,
+                right,
+                bottom,
+                image.size,
+            )
+            return None
+
+        return (
+            int(math.floor(left)),
+            int(math.floor(top)),
+            int(math.ceil(right)),
+            int(math.ceil(bottom)),
+        )
+
     def __char_width(self, c):
         return (c["x1"] - c["x0"]) // max(len(c["text"]), 1)
 
@@ -455,7 +522,22 @@ class RAGFlowPdfParser:
                 table_layouts.append({"page": p, "table_index": table_index, "layout": tb, "coords": (left, top, right, bott)})
 
                 # Crop table image
-                table_img = self.page_images[p].crop((left, top, right, bott))
+                crop_box = self._safe_crop_box(
+                    self.page_images[p],
+                    left,
+                    top,
+                    right,
+                    bott,
+                    context=f"table[{table_index}] page={p}",
+                )
+                if not crop_box:
+                    logging.warning(
+                        "Skip table %s on page %s due to invalid crop box",
+                        table_index,
+                        p,
+                    )
+                    continue
+                table_img = self.page_images[p].crop(crop_box)
 
                 if auto_rotate:
                     # Evaluate table orientation
@@ -1342,10 +1424,27 @@ class RAGFlowPdfParser:
                     logging.warning(f"Missing layout match: {pn + 1},%s" % (bxs[0].get("layoutno", "")))
 
                 left, top, right, bott = b["x0"], b["top"], b["x1"], b["bottom"]
-                if right < left:
-                    right = left + 1
-                poss.append((pn + self.page_from, left, right, top, bott))
-                return self.page_images[pn].crop((left * ZM, top * ZM, right * ZM, bott * ZM))
+                crop_box = self._safe_crop_box(
+                    self.page_images[pn],
+                    left * ZM,
+                    top * ZM,
+                    right * ZM,
+                    bott * ZM,
+                    context=f"{ltype} layout page={pn}",
+                )
+                if not crop_box:
+                    return None
+                x0, y0, x1, y1 = crop_box
+                poss.append(
+                    (
+                        pn + self.page_from,
+                        x0 / ZM,
+                        x1 / ZM,
+                        y0 / ZM,
+                        y1 / ZM,
+                    )
+                )
+                return self.page_images[pn].crop(crop_box)
             pn = {}
             for b in bxs:
                 p = local_page_index(b["page_number"])
@@ -1916,18 +2015,60 @@ class RAGFlowPdfParser:
                 logging.warning(f"Base page index {pns[0]} out of range for {page_count} pages during crop; skipping this segment.")
                 continue
 
-            imgs.append(self.page_images[pns[0]].crop((left * ZM, top * ZM, right * ZM, min(bottom, self.page_images[pns[0]].size[1]))))
+            img0 = self.page_images[pns[0]]
+            crop_box = self._safe_crop_box(
+                img0,
+                left * ZM,
+                top * ZM,
+                right * ZM,
+                min(bottom, img0.size[1]),
+                context=f"chunk page={pns[0]} segment={ii}",
+            )
+            if not crop_box:
+                bottom -= img0.size[1]
+                continue
+            imgs.append(img0.crop(crop_box))
             if 0 < ii < len(poss) - 1:
-                positions.append((pns[0] + self.page_from, left, right, top, min(bottom, self.page_images[pns[0]].size[1]) / ZM))
-            bottom -= self.page_images[pns[0]].size[1]
+                x0, y0, x1, y1 = crop_box
+                positions.append(
+                    (
+                        pns[0] + self.page_from,
+                        x0 / ZM,
+                        x1 / ZM,
+                        y0 / ZM,
+                        y1 / ZM,
+                    )
+                )
+            bottom -= img0.size[1]
             for pn in pns[1:]:
                 if not (0 <= pn < page_count):
                     logging.warning(f"Page index {pn} out of range for {page_count} pages during crop; skipping this page.")
                     continue
-                imgs.append(self.page_images[pn].crop((left * ZM, 0, right * ZM, min(bottom, self.page_images[pn].size[1]))))
+                page = self.page_images[pn]
+                crop_box = self._safe_crop_box(
+                    page,
+                    left * ZM,
+                    0,
+                    right * ZM,
+                    min(bottom, page.size[1]),
+                    context=f"chunk page={pn} segment={ii}",
+                )
+                if not crop_box:
+                    bottom -= page.size[1]
+                    continue
+                imgs.append(page.crop(crop_box))
                 if 0 < ii < len(poss) - 1:
-                    positions.append((pn + self.page_from, left, right, 0, min(bottom, self.page_images[pn].size[1]) / ZM))
-                bottom -= self.page_images[pn].size[1]
+                    x0, y0, x1, y1 = crop_box
+                    positions.append(
+                        (
+                            pn + self.page_from,
+                            x0 / ZM,
+                            x1 / ZM,
+                            y0 / ZM,
+                            y1 / ZM,
+                        )
+                    )
+                bottom -= page.size[1]
 
         if not imgs:
             if need_position:

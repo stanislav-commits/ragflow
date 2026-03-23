@@ -17,6 +17,7 @@
 import logging
 import random
 from collections import Counter, defaultdict
+import math
 
 from common.token_utils import num_tokens_from_string
 import re
@@ -299,6 +300,39 @@ def split_with_pattern(d, pattern: str, content: str, eng) -> list:
     return docs
 
 
+def _normalize_pdf_crop_positions(poss):
+    normalized = []
+    for item in poss or []:
+        if not item or len(item) != 5:
+            continue
+
+        pns, left, right, top, bottom = item
+        left = float(left)
+        right = float(right)
+        top = float(top)
+        bottom = float(bottom)
+
+        if not all(math.isfinite(value) for value in (left, right, top, bottom)):
+            continue
+
+        if right < left:
+            left, right = right, left
+        if bottom < top:
+            top, bottom = bottom, top
+
+        if isinstance(pns, (list, tuple, set)):
+            page_numbers = [pn for pn in pns if isinstance(pn, int)]
+        elif isinstance(pns, int):
+            page_numbers = [pns]
+        else:
+            page_numbers = []
+
+        for pn in page_numbers:
+            normalized.append((pn, left, right, top, bottom))
+
+    return normalized
+
+
 def tokenize_chunks(chunks, doc, eng, pdf_parser=None, child_delimiters_pattern=None):
     res = []
     # wrap up as es documents
@@ -314,6 +348,28 @@ def tokenize_chunks(chunks, doc, eng, pdf_parser=None, child_delimiters_pattern=
                 ck = pdf_parser.remove_tag(ck)
             except NotImplementedError:
                 pass
+            except Exception as exc:
+                logging.warning(
+                    "Failed to crop PDF chunk image; indexing text-only chunk instead. chunk_index=%s error=%s",
+                    ii,
+                    exc,
+                )
+                try:
+                    add_positions(
+                        d,
+                        _normalize_pdf_crop_positions(
+                            pdf_parser.extract_positions(ck),
+                        ),
+                    )
+                except Exception as pos_exc:
+                    logging.warning(
+                        "Failed to recover PDF chunk positions after crop error: %s",
+                        pos_exc,
+                    )
+                try:
+                    ck = pdf_parser.remove_tag(ck)
+                except Exception:
+                    pass
         else:
             add_positions(d, [[ii] * 5])
 
